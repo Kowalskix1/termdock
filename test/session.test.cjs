@@ -95,6 +95,27 @@ test('renderer ACK backpressure and disconnect resume a shell',async()=>{
  const {p,s}=fixture();s.setConnected(true);p.emit('data','x'.repeat(300000));await tick();await tick();assert.equal(p.paused,true);s.ack(1);await tick();assert.equal(p.paused,false);
  p.emit('data','z'.repeat(300000));await tick();assert.equal(p.paused,true);s.setConnected(false);await tick();assert.equal(p.paused,false);s.dispose();
 });
+test('snapshots restore mouse tracking AND encoding after reconnect at every mode boundary',async()=>{
+ for(const alternate of [false,true])for(const tracking of [9,1000,1002,1003])for(const encoding of [0,1006,1016]){
+  const {p,s,messages}=fixture();
+  const restored=new Terminal({allowProposedApi:true,cols:80,rows:24});
+  try{
+   p.emit('data',`${alternate?'\x1b[?1049h':''}TUI\x1b[?${tracking}h${encoding?`\x1b[?${encoding}h`:''}`);
+   s.setConnected(true);await new Promise(done=>s.snapshot(done));
+   const snapshot=messages.filter(m=>m.type==='snapshot').at(-1);
+   await write(restored,'\x1bc'+snapshot.data);
+   assert.equal(restored.modes.mouseTrackingMode,s.mirror.modes.mouseTrackingMode);
+   assert.equal(restored._core.coreMouseService.activeEncoding,s.mirror._core.coreMouseService.activeEncoding,
+    `tracking=${tracking}, encoding=${encoding}, alternate=${alternate}`);
+   // Keep the encoding even when tracking is temporarily disabled at the cutoff.
+   p.emit('data',`\x1b[?${tracking}l`);s.setConnected(false);s.setConnected(true);
+   await new Promise(done=>s.snapshot(done));
+   await write(restored,'\x1bc'+messages.filter(m=>m.type==='snapshot').at(-1).data);
+   await write(restored,`\x1b[?${tracking}h`);
+   assert.equal(restored._core.coreMouseService.activeEncoding,s.mirror._core.coreMouseService.activeEncoding);
+  }finally{s.dispose();restored.dispose();}
+ }
+});
 test('disconnected output still gets replayed, exited shell retained, close kills running shell',async()=>{
  const {p,s,messages}=fixture();p.emit('data','retained');await tick();assert.equal(messages.length,0);s.setConnected(true);await new Promise(r=>s.snapshot(r));assert.match(messages.find(m=>m.type==='snapshot').data,/retained/);
  s.write('ls\r');assert.equal(p.input,'ls\r');s.resize(100,30);assert.equal(p.cols,100);p.emit('exit',{exitCode:3});assert.equal(s.info().exitCode,3);assert.equal(s.info().running,false);s.write('ignored');assert.equal(p.input,'ls\r');s.dispose();

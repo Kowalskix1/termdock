@@ -2,7 +2,9 @@ import { Terminal, ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { handleClipboardKey, handleNativePaste } from './clipboard';
-import { enableUnicode, resizeTerminal, type TerminalSize } from '../src/terminal';
+import { configureTerminal, resizeTerminal, type TerminalSize } from '../src/terminal';
+import { restoreSnapshotState } from '../src/snapshot';
+import { useHostQueryResponses } from './queries';
 declare function acquireVsCodeApi(): {postMessage(message: unknown): void};
 const vscode = acquireVsCodeApi();
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -47,10 +49,12 @@ function create(info:Info) {
     leave:()=>{element.removeAttribute('title');element.removeAttribute('data-vscode-context');}
   };
   const term=new Terminal({...settings,theme:theme(),allowProposedApi:true,convertEol:false,macOptionIsMeta:true,macOptionClickForcesSelection:true,scrollOnUserInput:true,linkHandler:links});
-  enableUnicode(term);
+  configureTerminal(term);
+  useHostQueryResponses(term);
   const fitter=new FitAddon(); term.loadAddon(fitter); term.loadAddon(new WebLinksAddon(links.activate,links)); term.open(element);
   const tab:Tab={term,fit:fitter,element,seq:0,initialized:false,info}; tabs.set(info.id,tab);
   term.onData(data=>{if(tab.info.running) post({type:'input',id:info.id,data});});
+  term.onBinary(data=>{if(tab.info.running) post({type:'input',id:info.id,data,binary:true});});
   term.attachCustomKeyEventHandler(e=>handleClipboardKey(e,navigator.platform,{copy,paste}));
   element.addEventListener('paste',e=>handleNativePaste(e,paste),true);
   return tab;
@@ -87,9 +91,9 @@ window.addEventListener('message',event=>{
         tab.initialized = false;
         tab.seq = m.seq;
         const size = { cols: m.cols, rows: m.rows };
-        tab.requestedSize = size;
         tab.term.write('\x1bc', () => resizeTerminal(tab.term, size));
         tab.term.write(m.data, () => {
+          if (m.runtime) restoreSnapshotState(tab.term, m.runtime);
           tab.initialized = true;
           post({ type: 'ack', id: m.id, seq: m.seq });
           if (m.id === active) { scheduleFit(); focus(); }

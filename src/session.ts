@@ -2,10 +2,12 @@ import type { IPty } from 'node-pty';
 import { Terminal } from '@xterm/headless';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { AnsiTail } from './ansi';
-import { enableUnicode, resizeTerminal, type TerminalSize } from './terminal';
+import { configureTerminal, resizeTerminal, type TerminalSize } from './terminal';
+import { captureSnapshotState } from './snapshot';
 export { AnsiTail } from './ansi';
 export interface SessionInfo { id: string; name: string; cwd: string; running: boolean; exitCode?: number; }
 type Output = { data: string; seq: number } | TerminalSize;
+const snapshotOptions: Parameters<SerializeAddon['serialize']>[0] & { fixedAlternateRows: boolean } = { fixedAlternateRows: true };
 export class Session {
   readonly mirror: Terminal;
   readonly serializer: SerializeAddon;
@@ -34,9 +36,9 @@ export class Session {
     private readonly send: (message: unknown) => void, private readonly changed: () => void) {
     this.size = { cols: pty.cols, rows: pty.rows };
     this.mirror = new Terminal({ ...this.size, scrollback, allowProposedApi: true });
-    enableUnicode(this.mirror);
+    configureTerminal(this.mirror);
     this.serializer = new SerializeAddon(); this.mirror.loadAddon(this.serializer);
-    this.subscriptions.push(this.mirror.onData(data=>{if(!this.connected && this.running) this.pty.write(data);}));
+    this.subscriptions.push(this.mirror.onData(data => this.write(data)));
     this.subscriptions.push(pty.onData(data => this.receive(data)));
     this.exitSubscription = pty.onExit(e => {
       if (this.terminationTimer) clearTimeout(this.terminationTimer);
@@ -95,9 +97,10 @@ export class Session {
         else for (const cb of this.snapshotRequests.splice(0)) cb();
         return;
       }
-      const data = this.serializer.serialize() + tail;
-      this.unacknowledged.clear();this.clientPending=0;this.track(seq,data.length);
-      this.send({ type: 'snapshot', id: this.id, data, seq, cols: this.mirror.cols, rows: this.mirror.rows });
+      const data = this.serializer.serialize(snapshotOptions) + tail;
+      const runtime = captureSnapshotState(this.mirror);
+      this.unacknowledged.clear();this.clientPending=0;this.track(seq,data.length + JSON.stringify(runtime).length);
+      this.send({ type: 'snapshot', id: this.id, data, seq, cols: this.mirror.cols, rows: this.mirror.rows, runtime });
       this.snapshotting = false;
       for (const packet of this.afterSnapshot) this.forward(packet);
       this.afterSnapshot = []; this.flush();
@@ -121,6 +124,8 @@ export class Session {
     else if(this.paused && this.pending<32*1024 && this.clientPending<64*1024) {this.paused=false;this.pty.resume();}
   }
   write(data: string) { if (this.running && !this.disposed) this.pty.write(data); }
+  // xterm's legacy mouse reports contain byte coordinates, not UTF-8 text.
+  writeBinary(data: string) { if (this.running && !this.disposed) this.pty.write(Buffer.from(data, 'latin1')); }
   resize(cols: number, rows: number) {
     if (this.disposed || (cols === this.size.cols && rows === this.size.rows)) return;
     const size = { cols, rows };
